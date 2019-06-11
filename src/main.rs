@@ -1,20 +1,17 @@
+use crate::exercise::{Exercise, ExerciseList};
 use crate::run::run;
 use crate::verify::verify;
 use clap::{crate_version, App, Arg, SubCommand};
 use notify::DebouncedEvent;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use std::ffi::OsStr;
-use std::io::BufRead;
+use std::fs;
 use std::path::Path;
 use std::sync::mpsc::channel;
 use std::time::Duration;
-use syntect::easy::HighlightFile;
-use syntect::highlighting::{Style, ThemeSet};
-use syntect::parsing::SyntaxSet;
-use syntect::util::as_24_bit_terminal_escaped;
 
+mod exercise;
 mod run;
-mod util;
 mod verify;
 
 fn main() {
@@ -33,9 +30,6 @@ fn main() {
         )
         .get_matches();
 
-    let ss = SyntaxSet::load_defaults_newlines();
-    let ts = ThemeSet::load_defaults();
-
     if None == matches.subcommand_name() {
         println!();
         println!(r#"       welcome to...                      "#);
@@ -53,44 +47,55 @@ fn main() {
             "{} must be run from the rustlings directory",
             std::env::current_exe().unwrap().to_str().unwrap()
         );
+        println!("Try `cd rustlings/`!");
         std::process::exit(1);
     }
 
-    if let Some(matches) = matches.subcommand_matches("run") {
-        run(matches.clone()).unwrap();
+    let toml_str = &fs::read_to_string("info.toml").unwrap();
+    let exercises = toml::from_str::<ExerciseList>(toml_str).unwrap().exercises;
+
+    if let Some(ref matches) = matches.subcommand_matches("run") {
+        let filename = matches.value_of("file").unwrap_or_else(|| {
+            println!("Please supply a file name!");
+            std::process::exit(1);
+        });
+
+        let matching_exercise = |e: &&Exercise| {
+            Path::new(filename)
+                .canonicalize()
+                .map(|p| p.ends_with(&e.path))
+                .unwrap_or(false)
+        };
+
+        let exercise = exercises.iter().find(matching_exercise).unwrap_or_else(|| {
+            println!("No exercise found for your file name!");
+            std::process::exit(1)
+        });
+
+        run(&exercise).unwrap_or_else(|_| std::process::exit(1));
     }
 
     if matches.subcommand_matches("verify").is_some() {
-        match verify(None) {
-            Ok(_) => {}
-            Err(_) => std::process::exit(1),
-        }
+        verify(&exercises).unwrap_or_else(|_| std::process::exit(1));
     }
 
     if matches.subcommand_matches("watch").is_some() {
-        watch().unwrap();
+        watch(&exercises).unwrap();
     }
 
     if matches.subcommand_name().is_none() {
-        let mut highlighter =
-            HighlightFile::new("default_out.md", &ss, &ts.themes["base16-eighties.dark"]).unwrap();
-        for maybe_line in highlighter.reader.lines() {
-            let line = maybe_line.unwrap();
-            let regions: Vec<(Style, &str)> = highlighter.highlight_lines.highlight(&line, &ss);
-            println!("{}", as_24_bit_terminal_escaped(&regions[..], true));
-        }
+        let text = fs::read_to_string("default_out.txt").unwrap();
+        println!("{}", text);
     }
-
-    println!("\x1b[0m");
 }
 
-fn watch() -> notify::Result<()> {
+fn watch(exercises: &[Exercise]) -> notify::Result<()> {
     let (tx, rx) = channel();
 
     let mut watcher: RecommendedWatcher = Watcher::new(tx, Duration::from_secs(2))?;
-    watcher.watch("./exercises", RecursiveMode::Recursive)?;
+    watcher.watch(Path::new("./exercises"), RecursiveMode::Recursive)?;
 
-    let _ignored = verify(None);
+    let _ignored = verify(exercises.iter());
 
     loop {
         match rx.recv() {
@@ -98,7 +103,11 @@ fn watch() -> notify::Result<()> {
                 DebouncedEvent::Create(b) | DebouncedEvent::Chmod(b) | DebouncedEvent::Write(b) => {
                     if b.extension() == Some(OsStr::new("rs")) {
                         println!("----------**********----------\n");
-                        let _ignored = verify(Some(b.as_path().to_str().unwrap()));
+                        let filepath = b.as_path().canonicalize().unwrap();
+                        let exercise = exercises
+                            .iter()
+                            .skip_while(|e| !filepath.ends_with(&e.path));
+                        let _ignored = verify(exercise);
                     }
                 }
                 _ => {}
